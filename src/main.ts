@@ -46,6 +46,11 @@ const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
 dirLight.position.set(10, 20, 10);
 scene.add(dirLight);
 
+// --- Vertex highlight ---
+const vertexHighlight = document.getElementById('vertex-highlight') as HTMLElement;
+const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+const raycaster = new THREE.Raycaster();
+
 // --- Input state ---
 const keys: Record<string, boolean> = {};
 
@@ -115,6 +120,32 @@ function animate() {
   if (velocity.lengthSq() > 0) {
     velocity.normalize().multiplyScalar(moveSpeed * dt);
     camera.position.add(velocity);
+  }
+
+  // --- Vertex highlight ---
+  raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+  const groundHit = raycaster.ray.intersectPlane(groundPlane, new THREE.Vector3());
+
+  vertexHighlight.style.display = 'none';
+  if (groundHit) {
+    const vx = Math.round(groundHit.x);
+    const vz = Math.round(groundHit.z);
+    const vertexWorld = new THREE.Vector3(vx, 0, vz);
+    const distToCamera = camera.position.distanceTo(vertexWorld);
+
+    if (distToCamera < 20) {
+      const ndc = vertexWorld.clone().project(camera);
+      const screenDist = Math.sqrt(ndc.x * ndc.x + ndc.y * ndc.y);
+
+      if (screenDist < 0.06) {
+        const sx = (ndc.x * 0.5 + 0.5) * window.innerWidth;
+        const sy = (-ndc.y * 0.5 + 0.5) * window.innerHeight;
+        vertexHighlight.style.left = `${sx}px`;
+        vertexHighlight.style.top = `${sy}px`;
+        vertexHighlight.style.transform = 'translate(-50%, -50%)';
+        vertexHighlight.style.display = '';
+      }
+    }
   }
 
   renderer.render(scene, camera);
