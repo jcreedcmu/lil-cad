@@ -7,9 +7,22 @@
     <style>
       body { margin: 0; overflow: hidden; }
       canvas { display: block; }
+      #reticle {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        pointer-events: none;
+      }
     </style>
   </head>
   <body>
+    <svg id="reticle" width="20" height="20" viewBox="0 0 20 20">
+      <line x1="10" y1="2" x2="10" y2="18" stroke="black" stroke-width="4"/>
+      <line x1="2" y1="10" x2="18" y2="10" stroke="black" stroke-width="4"/>
+      <line x1="10" y1="2" x2="10" y2="18" stroke="white" stroke-width="2"/>
+      <line x1="2" y1="10" x2="18" y2="10" stroke="white" stroke-width="2"/>
+    </svg>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
