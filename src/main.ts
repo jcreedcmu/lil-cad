@@ -133,11 +133,12 @@ function animate() {
     const vertexWorld = new THREE.Vector3(vx, 0, vz);
     const distToCamera = camera.position.distanceTo(vertexWorld);
 
-    if (distToCamera < 20) {
+    if (distToCamera < 8) {
       const ndc = vertexWorld.clone().project(camera);
       const screenDist = Math.sqrt(ndc.x * ndc.x + ndc.y * ndc.y);
 
-      if (screenDist < 0.06) {
+      const ndcThreshold = 0.15 / distToCamera;
+      if (screenDist < ndcThreshold) {
         const sx = (ndc.x * 0.5 + 0.5) * window.innerWidth;
         const sy = (-ndc.y * 0.5 + 0.5) * window.innerHeight;
         vertexHighlight.style.left = `${sx}px`;
