@@ -202,14 +202,42 @@ window.addEventListener('resize', () => {
 });
 
 // --- Helpers ---
-function projectToScreen(v: Vertex): { x: number; y: number } | null {
-  const world = new THREE.Vector3(v.x, 0, v.z);
-  const ndc = world.project(camera);
-  if (ndc.z > 1) return null; // behind camera
+type ScreenPoint = { x: number; y: number };
+
+function viewToScreen(view: THREE.Vector3): ScreenPoint {
+  const ndc = view.clone().applyMatrix4(camera.projectionMatrix);
   return {
     x: (ndc.x * 0.5 + 0.5) * window.innerWidth,
     y: (-ndc.y * 0.5 + 0.5) * window.innerHeight,
   };
+}
+
+function projectVertex(v: Vertex): ScreenPoint | null {
+  const world = new THREE.Vector3(v.x, 0, v.z);
+  const view = world.applyMatrix4(camera.matrixWorldInverse);
+  if (view.z > -0.2) return null; // behind near plane
+  return viewToScreen(view);
+}
+
+function projectEdge(a: Vertex, b: Vertex): [ScreenPoint, ScreenPoint] | null {
+  const nearZ = -0.2;
+  const viewA = new THREE.Vector3(a.x, 0, a.z).applyMatrix4(camera.matrixWorldInverse);
+  const viewB = new THREE.Vector3(b.x, 0, b.z).applyMatrix4(camera.matrixWorldInverse);
+
+  if (viewA.z > nearZ && viewB.z > nearZ) return null; // both behind
+
+  let clippedA = viewA;
+  let clippedB = viewB;
+
+  if (viewA.z > nearZ) {
+    const t = (nearZ - viewB.z) / (viewA.z - viewB.z);
+    clippedA = viewB.clone().lerp(viewA, t);
+  } else if (viewB.z > nearZ) {
+    const t = (nearZ - viewA.z) / (viewB.z - viewA.z);
+    clippedB = viewA.clone().lerp(viewB, t);
+  }
+
+  return [viewToScreen(clippedA), viewToScreen(clippedB)];
 }
 
 function drawReticle() {
@@ -255,9 +283,9 @@ function drawUxState() {
   // Edges
   const edgeCount = closed ? verts.length : verts.length - 1;
   for (let i = 0; i < edgeCount; i++) {
-    const a = projectToScreen(verts[i]);
-    const b = projectToScreen(verts[(i + 1) % verts.length]);
-    if (!a || !b) continue;
+    const edge = projectEdge(verts[i], verts[(i + 1) % verts.length]);
+    if (!edge) continue;
+    const [a, b] = edge;
     olCtx.beginPath();
     olCtx.moveTo(a.x, a.y);
     olCtx.lineTo(b.x, b.y);
@@ -269,7 +297,7 @@ function drawUxState() {
 
   // Vertices
   for (const v of verts) {
-    const s = projectToScreen(v);
+    const s = projectVertex(v);
     if (!s) continue;
     olCtx.beginPath();
     olCtx.arc(s.x, s.y, 5, 0, Math.PI * 2);
