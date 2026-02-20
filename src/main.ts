@@ -60,12 +60,22 @@ const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
 dirLight.position.set(10, 20, 10);
 scene.add(dirLight);
 
-// --- Vertex highlight & path ---
+// --- Types ---
+type Vertex = { x: number; z: number };
+
+function vertexEqual(a: Vertex, b: Vertex): boolean {
+  return a.x === b.x && a.z === b.z;
+}
+
+type UxState =
+  | { t: 'idle' }
+  | { t: 'drawing'; vertices: Vertex[] }
+  | { t: 'polygon'; vertices: Vertex[] };
+
+// --- State ---
 const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 const raycaster = new THREE.Raycaster();
-
-type Vertex = { x: number; z: number };
-const path: Vertex[] = [];
+let uxState: UxState = { t: 'idle' };
 let highlightedVertex: Vertex | null = null;
 
 // --- Input state ---
@@ -85,8 +95,24 @@ let pitch = 0;
 renderer.domElement.addEventListener('click', () => {
   if (document.pointerLockElement !== renderer.domElement) {
     renderer.domElement.requestPointerLock();
-  } else if (highlightedVertex) {
-    path.push({ ...highlightedVertex });
+    return;
+  }
+  if (!highlightedVertex) return;
+  const v = { ...highlightedVertex };
+
+  switch (uxState.t) {
+    case 'idle':
+      uxState = { t: 'drawing', vertices: [v] };
+      break;
+    case 'drawing':
+      if (uxState.vertices.length >= 3 && vertexEqual(v, uxState.vertices[0])) {
+        uxState = { t: 'polygon', vertices: uxState.vertices };
+      } else if (!vertexEqual(v, uxState.vertices[uxState.vertices.length - 1])) {
+        uxState.vertices.push(v);
+      }
+      break;
+    case 'polygon':
+      break;
   }
 });
 
@@ -152,11 +178,16 @@ function drawHighlight(sx: number, sy: number) {
   olCtx.stroke();
 }
 
-function drawPath() {
+function drawUxState() {
+  if (uxState.t === 'idle') return;
+  const verts = uxState.vertices;
+  const closed = uxState.t === 'polygon';
+
   // Edges
-  for (let i = 0; i < path.length - 1; i++) {
-    const a = projectToScreen(path[i]);
-    const b = projectToScreen(path[i + 1]);
+  const edgeCount = closed ? verts.length : verts.length - 1;
+  for (let i = 0; i < edgeCount; i++) {
+    const a = projectToScreen(verts[i]);
+    const b = projectToScreen(verts[(i + 1) % verts.length]);
     if (!a || !b) continue;
     olCtx.beginPath();
     olCtx.moveTo(a.x, a.y);
@@ -168,7 +199,7 @@ function drawPath() {
   }
 
   // Vertices
-  for (const v of path) {
+  for (const v of verts) {
     const s = projectToScreen(v);
     if (!s) continue;
     olCtx.beginPath();
@@ -250,7 +281,7 @@ function animate() {
     }
   }
 
-  drawPath();
+  drawUxState();
   drawReticle();
 }
 
