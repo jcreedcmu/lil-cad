@@ -70,7 +70,7 @@ function vertexEqual(a: Vertex, b: Vertex): boolean {
 type UxState =
   | { t: 'idle' }
   | { t: 'drawing'; vertices: Vertex[] }
-  | { t: 'polygon'; vertices: Vertex[] };
+  | { t: 'polygon'; vertices: Vertex[]; extrusion: number };
 
 // --- State ---
 const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -78,11 +78,65 @@ const raycaster = new THREE.Raycaster();
 let uxState: UxState = { t: 'idle' };
 let highlightedVertex: Vertex | null = null;
 
+// --- Extrusion preview ---
+let previewMesh: THREE.Mesh | null = null;
+
+function makeExtrudedGeo(vertices: Vertex[], height: number): THREE.ExtrudeGeometry {
+  const shape = new THREE.Shape();
+  shape.moveTo(vertices[0].x, -vertices[0].z);
+  for (let i = 1; i < vertices.length; i++) {
+    shape.lineTo(vertices[i].x, -vertices[i].z);
+  }
+  shape.closePath();
+  return new THREE.ExtrudeGeometry(shape, { depth: height, bevelEnabled: false });
+}
+
+function clearPreview() {
+  if (previewMesh) {
+    scene.remove(previewMesh);
+    previewMesh.geometry.dispose();
+    (previewMesh.material as THREE.Material).dispose();
+    previewMesh = null;
+  }
+}
+
+function updatePreview(vertices: Vertex[], extrusion: number) {
+  clearPreview();
+  if (extrusion <= 0) return;
+  const geo = makeExtrudedGeo(vertices, extrusion);
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0x4488ff,
+    transparent: true,
+    opacity: 0.5,
+  });
+  previewMesh = new THREE.Mesh(geo, mat);
+  previewMesh.rotation.x = -Math.PI / 2;
+  scene.add(previewMesh);
+}
+
+function acceptExtrusion(vertices: Vertex[], extrusion: number) {
+  clearPreview();
+  const geo = makeExtrudedGeo(vertices, extrusion);
+  const mat = new THREE.MeshStandardMaterial({ color: 0x4488ff });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.rotation.x = -Math.PI / 2;
+  scene.add(mesh);
+}
+
 // --- Input state ---
 const keys: Record<string, boolean> = {};
 
 window.addEventListener('keydown', (e) => {
   keys[e.code] = true;
+  if (uxState.t === 'polygon') {
+    if (e.code === 'ArrowUp') {
+      uxState.extrusion++;
+      updatePreview(uxState.vertices, uxState.extrusion);
+    } else if (e.code === 'ArrowDown') {
+      uxState.extrusion = Math.max(0, uxState.extrusion - 1);
+      updatePreview(uxState.vertices, uxState.extrusion);
+    }
+  }
 });
 window.addEventListener('keyup', (e) => {
   keys[e.code] = false;
@@ -97,22 +151,37 @@ renderer.domElement.addEventListener('click', () => {
     renderer.domElement.requestPointerLock();
     return;
   }
-  if (!highlightedVertex) return;
-  const v = { ...highlightedVertex };
 
   switch (uxState.t) {
     case 'idle':
-      uxState = { t: 'drawing', vertices: [v] };
+      if (highlightedVertex) {
+        uxState = { t: 'drawing', vertices: [{ ...highlightedVertex }] };
+      }
       break;
     case 'drawing':
-      if (uxState.vertices.length >= 3 && vertexEqual(v, uxState.vertices[0])) {
-        uxState = { t: 'polygon', vertices: uxState.vertices };
-      } else if (!vertexEqual(v, uxState.vertices[uxState.vertices.length - 1])) {
-        uxState.vertices.push(v);
+      if (highlightedVertex) {
+        const v = { ...highlightedVertex };
+        if (uxState.vertices.length >= 3 && vertexEqual(v, uxState.vertices[0])) {
+          uxState = { t: 'polygon', vertices: uxState.vertices, extrusion: 0 };
+        } else if (!vertexEqual(v, uxState.vertices[uxState.vertices.length - 1])) {
+          uxState.vertices.push(v);
+        }
       }
       break;
     case 'polygon':
+      if (uxState.extrusion > 0) {
+        acceptExtrusion(uxState.vertices, uxState.extrusion);
+        uxState = { t: 'idle' };
+      }
       break;
+  }
+});
+
+renderer.domElement.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  if (uxState.t === 'polygon') {
+    clearPreview();
+    uxState = { t: 'idle' };
   }
 });
 
@@ -256,11 +325,11 @@ function animate() {
   // --- Render 2D overlay ---
   olCtx.clearRect(0, 0, window.innerWidth, window.innerHeight);
 
-  // Vertex highlight
+  // Vertex highlight (only in idle/drawing states)
+  highlightedVertex = null;
+  if (uxState.t !== 'polygon') {
   raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
   const groundHit = raycaster.ray.intersectPlane(groundPlane, new THREE.Vector3());
-
-  highlightedVertex = null;
   if (groundHit) {
     const vx = Math.round(groundHit.x);
     const vz = Math.round(groundHit.z);
@@ -280,6 +349,7 @@ function animate() {
       }
     }
   }
+  } // end if not polygon
 
   drawUxState();
   drawReticle();
