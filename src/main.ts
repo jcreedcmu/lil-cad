@@ -6,8 +6,12 @@ import { SSAOPass } from 'three/addons/postprocessing/SSAOPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 // --- Renderer ---
+const sidebar = document.getElementById('sidebar')!;
+function viewWidth() { return window.innerWidth - sidebar.offsetWidth; }
+function viewHeight() { return window.innerHeight; }
+
 const renderer = new THREE.WebGLRenderer();
-renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setSize(viewWidth(), viewHeight());
 renderer.setPixelRatio(window.devicePixelRatio);
 document.body.appendChild(renderer.domElement);
 
@@ -17,10 +21,11 @@ const olCtx = overlay.getContext('2d')!;
 
 function resizeOverlay() {
   const dpr = window.devicePixelRatio;
-  overlay.width = window.innerWidth * dpr;
-  overlay.height = window.innerHeight * dpr;
-  overlay.style.width = window.innerWidth + 'px';
-  overlay.style.height = window.innerHeight + 'px';
+  overlay.width = viewWidth() * dpr;
+  overlay.height = viewHeight() * dpr;
+  overlay.style.width = viewWidth() + 'px';
+  overlay.style.height = viewHeight() + 'px';
+  overlay.style.left = sidebar.offsetWidth + 'px';
   olCtx.scale(dpr, dpr);
 }
 resizeOverlay();
@@ -30,7 +35,7 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87ceeb); // light blue sky
 
 // --- Camera ---
-const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+const camera = new THREE.PerspectiveCamera(75, viewWidth() / viewHeight(), 0.1, 1000);
 camera.position.set(0, 1.6, 5); // eye height ~1.6m
 
 // --- Checkerboard floor ---
@@ -68,7 +73,7 @@ scene.add(dirLight);
 // --- Post-processing (SSAO) ---
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
-const ssaoPass = new SSAOPass(scene, camera, window.innerWidth, window.innerHeight);
+const ssaoPass = new SSAOPass(scene, camera, viewWidth(), viewHeight());
 ssaoPass.kernelRadius = 16;
 ssaoPass.minDistance = 0.001;
 ssaoPass.maxDistance = 0.3;
@@ -85,13 +90,13 @@ groundBody.addShape(new CANNON.Plane());
 groundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
 world.addBody(groundBody);
 
-const playerRadius = 0.5;
+const playerHalfExtents = new CANNON.Vec3(0.25, 1, 0.25); // 0.5m x 2m x 0.5m
 const playerMaterial = new CANNON.Material({ friction: 0 });
 const playerBody = new CANNON.Body({
   mass: 5,
-  shape: new CANNON.Sphere(playerRadius),
+  shape: new CANNON.Box(playerHalfExtents),
   fixedRotation: true,
-  position: new CANNON.Vec3(0, playerRadius, 5),
+  position: new CANNON.Vec3(0, playerHalfExtents.y, 5),
   material: playerMaterial,
 });
 world.addBody(playerBody);
@@ -102,13 +107,13 @@ function checkCanJump(): boolean {
     playerBody.position.y,
     playerBody.position.z,
   );
-  const to = new CANNON.Vec3(from.x, from.y - playerRadius - 0.15, from.z);
+  const to = new CANNON.Vec3(from.x, from.y - playerHalfExtents.y - 0.15, from.z);
   const result = new CANNON.RaycastResult();
   world.raycastClosest(from, to, {}, result);
   return result.hasHit && result.body !== playerBody;
 }
 
-const eyeOffset = 1.1; // eye at ~1.6m (body center at 0.5 + offset 1.1)
+const eyeOffset = 0.6; // eye at ~1.6m (body center at 1.0 + offset 0.6)
 
 // --- Types ---
 type Vertex = { x: number; z: number };
@@ -164,43 +169,82 @@ function updatePreview(vertices: Vertex[], extrusion: number) {
   scene.add(previewMesh);
 }
 
-function addTrimeshBody(geo: THREE.ExtrudeGeometry) {
-  const posAttr = geo.getAttribute('position');
-
-  // Apply the same -PI/2 X rotation to transform vertices into world space
-  const rotMatrix = new THREE.Matrix4().makeRotationX(-Math.PI / 2);
-  const vertices = new Float32Array(posAttr.count * 3);
-  const v = new THREE.Vector3();
-  for (let i = 0; i < posAttr.count; i++) {
-    v.fromBufferAttribute(posAttr, i).applyMatrix4(rotMatrix);
-    vertices[i * 3] = v.x;
-    vertices[i * 3 + 1] = v.y;
-    vertices[i * 3 + 2] = v.z;
+function isConvexCCW(verts: Vertex[]): boolean {
+  const n = verts.length;
+  if (n < 3) return false;
+  for (let i = 0; i < n; i++) {
+    const a = verts[i], b = verts[(i + 1) % n], c = verts[(i + 2) % n];
+    const cross = (b.x - a.x) * (c.z - a.z) - (b.z - a.z) * (c.x - a.x);
+    if (cross < 0) return false;
   }
-
-  // Non-indexed geometry: every 3 vertices form a triangle
-  const indices = new Int32Array(posAttr.count);
-  for (let i = 0; i < posAttr.count; i++) {
-    indices[i] = i;
-  }
-
-  const trimesh = new CANNON.Trimesh(
-    vertices as unknown as number[],
-    indices as unknown as number[],
-  );
-  const body = new CANNON.Body({ mass: 0 });
-  body.addShape(trimesh);
-  world.addBody(body);
+  return true;
 }
 
-function acceptExtrusion(vertices: Vertex[], extrusion: number) {
+function ensureCCW(verts: Vertex[]): Vertex[] {
+  let area = 0;
+  for (let i = 0; i < verts.length; i++) {
+    const j = (i + 1) % verts.length;
+    area += verts[i].x * verts[j].z - verts[j].x * verts[i].z;
+  }
+  return area > 0 ? verts : [...verts].reverse();
+}
+
+function addConvexBody(verts: Vertex[], height: number): boolean {
+  const ccw = ensureCCW(verts);
+  if (!isConvexCCW(ccw)) return false;
+
+  const n = ccw.length;
+
+  // Compute centroid so we can center vertices at origin (like CANNON.Box does)
+  let cx = 0, cz = 0;
+  for (const v of ccw) { cx += v.x; cz += v.z; }
+  cx /= n;
+  cz /= n;
+  const cy = height / 2;
+
+  const cannonVerts: CANNON.Vec3[] = [];
+  for (const v of ccw) cannonVerts.push(new CANNON.Vec3(v.x - cx, -cy, v.z - cz));
+  for (const v of ccw) cannonVerts.push(new CANNON.Vec3(v.x - cx, cy, v.z - cz));
+
+  const faces: number[][] = [];
+
+  // Bottom face
+  const bottom: number[] = [];
+  for (let i = 0; i < n; i++) bottom.push(i);
+  faces.push(bottom);
+
+  // Top face
+  const top: number[] = [];
+  for (let i = n - 1; i >= 0; i--) top.push(n + i);
+  faces.push(top);
+
+  // Side faces
+  for (let i = 0; i < n; i++) {
+    const next = (i + 1) % n;
+    faces.push([next, i, n + i, n + next]);
+  }
+
+  const shape = new CANNON.ConvexPolyhedron({ vertices: cannonVerts, faces });
+
+  const body = new CANNON.Body({ mass: 0 });
+  body.addShape(shape);
+  body.position.set(cx, cy, cz);
+  world.addBody(body);
+  return true;
+}
+
+function acceptExtrusion(vertices: Vertex[], extrusion: number): boolean {
   clearPreview();
+  if (!addConvexBody(vertices, extrusion)) {
+    console.warn('Polygon is not convex, rejecting extrusion');
+    return false;
+  }
   const geo = makeExtrudedGeo(vertices, extrusion);
   const mat = new THREE.MeshStandardMaterial({ color: 0x4488ff });
   const mesh = new THREE.Mesh(geo, mat);
   mesh.rotation.x = -Math.PI / 2;
   scene.add(mesh);
-  addTrimeshBody(geo);
+  return true;
 }
 
 // --- Default geometry: 3-step staircase ---
@@ -224,6 +268,7 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'Space' && checkCanJump()) {
     playerBody.velocity.y = 6;
   }
+
   if (uxState.t === 'polygon') {
     if (e.code === 'ArrowUp') {
       uxState.extrusion++;
@@ -266,8 +311,9 @@ renderer.domElement.addEventListener('click', () => {
       break;
     case 'polygon':
       if (uxState.extrusion > 0) {
-        acceptExtrusion(uxState.vertices, uxState.extrusion);
-        uxState = { t: 'idle' };
+        if (acceptExtrusion(uxState.vertices, uxState.extrusion)) {
+          uxState = { t: 'idle' };
+        }
       }
       break;
   }
@@ -291,10 +337,10 @@ document.addEventListener('mousemove', (e) => {
 
 // --- Resize ---
 window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.aspect = viewWidth() / viewHeight();
   camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  composer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setSize(viewWidth(), viewHeight());
+  composer.setSize(viewWidth(), viewHeight());
   resizeOverlay();
 });
 
@@ -304,8 +350,8 @@ type ScreenPoint = { x: number; y: number };
 function viewToScreen(view: THREE.Vector3): ScreenPoint {
   const ndc = view.clone().applyMatrix4(camera.projectionMatrix);
   return {
-    x: (ndc.x * 0.5 + 0.5) * window.innerWidth,
-    y: (-ndc.y * 0.5 + 0.5) * window.innerHeight,
+    x: (ndc.x * 0.5 + 0.5) * viewWidth(),
+    y: (-ndc.y * 0.5 + 0.5) * viewHeight(),
   };
 }
 
@@ -338,8 +384,8 @@ function projectEdge(a: Vertex, b: Vertex): [ScreenPoint, ScreenPoint] | null {
 }
 
 function drawReticle() {
-  const cx = window.innerWidth / 2;
-  const cy = window.innerHeight / 2;
+  const cx = viewWidth() / 2;
+  const cy = viewHeight() / 2;
   const size = 8;
 
   olCtx.lineWidth = 4;
@@ -445,7 +491,7 @@ function animate() {
 
   const onGround = checkCanJump();
   const airAccel = 0.05;
-  const airDecel = 0.002;
+  const airDecel = 0.05;
 
   if (onGround) {
     playerBody.velocity.x = inputVel.x;
@@ -459,8 +505,8 @@ function animate() {
   world.step(1 / 60, dt, 3);
 
   if (onGround) {
-    playerBody.velocity.x = 0;
-    playerBody.velocity.z = 0;
+    playerBody.velocity.x = inputVel.x;
+    playerBody.velocity.z = inputVel.z;
   }
 
   camera.position.set(
@@ -469,11 +515,12 @@ function animate() {
     playerBody.position.z,
   );
 
+
   // --- Render 3D ---
   composer.render();
 
   // --- Render 2D overlay ---
-  olCtx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+  olCtx.clearRect(0, 0, viewWidth(), viewHeight());
 
   // Vertex highlight (only in idle/drawing states)
   highlightedVertex = null;
@@ -493,8 +540,8 @@ function animate() {
         const ndcThreshold = 0.15 / distToCamera;
         if (screenDist < ndcThreshold) {
           highlightedVertex = { x: vx, z: vz };
-          const sx = (ndc.x * 0.5 + 0.5) * window.innerWidth;
-          const sy = (-ndc.y * 0.5 + 0.5) * window.innerHeight;
+          const sx = (ndc.x * 0.5 + 0.5) * viewWidth();
+          const sy = (-ndc.y * 0.5 + 0.5) * viewHeight();
           drawHighlight(sx, sy);
         }
       }
@@ -506,3 +553,63 @@ function animate() {
 }
 
 animate();
+
+// --- Sidebar: physics test ---
+const testBoxHalf = new CANNON.Vec3(0.3, 0.3, 0.3);
+const testMeshes: THREE.Mesh[] = [];
+const testBodies: CANNON.Body[] = [];
+
+function launchTestBox(x: number, y: number, z: number, vx = 0, vz = 0) {
+  const geo = new THREE.BoxGeometry(testBoxHalf.x * 2, testBoxHalf.y * 2, testBoxHalf.z * 2);
+  const mat = new THREE.MeshStandardMaterial({ color: 0xff4444 });
+  const mesh = new THREE.Mesh(geo, mat);
+  scene.add(mesh);
+  testMeshes.push(mesh);
+
+  const body = new CANNON.Body({
+    mass: 1,
+    shape: new CANNON.Box(testBoxHalf),
+    position: new CANNON.Vec3(x, y, z),
+  });
+  body.velocity.set(vx, 0, vz);
+  world.addBody(body);
+  testBodies.push(body);
+}
+
+document.getElementById('btn-test1')!.addEventListener('click', () => {
+  launchTestBox(0, 8, -3.8);
+});
+
+document.getElementById('btn-test2')!.addEventListener('click', () => {
+  launchTestBox(0, testBoxHalf.y, 2, 0, -5);
+});
+
+document.getElementById('btn-clear')!.addEventListener('click', () => {
+  for (const mesh of testMeshes) {
+    scene.remove(mesh);
+    mesh.geometry.dispose();
+    (mesh.material as THREE.Material).dispose();
+  }
+  for (const body of testBodies) {
+    world.removeBody(body);
+  }
+  testMeshes.length = 0;
+  testBodies.length = 0;
+});
+
+// Sync test sphere meshes with physics in the animation loop
+const origAnimate = animate;
+function syncTestBodies() {
+  for (let i = 0; i < testBodies.length; i++) {
+    const b = testBodies[i];
+    const m = testMeshes[i];
+    m.position.set(b.position.x, b.position.y, b.position.z);
+    m.quaternion.set(b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w);
+  }
+}
+// Inject sync into the render loop by patching the composer
+const origRender = composer.render.bind(composer);
+composer.render = function (...args: Parameters<typeof composer.render>) {
+  syncTestBodies();
+  return origRender(...args);
+};
