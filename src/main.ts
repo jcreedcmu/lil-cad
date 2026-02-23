@@ -136,6 +136,29 @@ let highlightedVertex: Vertex | null = null;
 // --- Extrusion preview ---
 let previewMesh: THREE.Mesh | null = null;
 
+// --- Terra cotta noise texture (16x16, tiles every 1m) ---
+const noiseSize = 16;
+const noiseCanvas = document.createElement('canvas');
+noiseCanvas.width = noiseSize;
+noiseCanvas.height = noiseSize;
+const noiseCtx = noiseCanvas.getContext('2d')!;
+for (let y = 0; y < noiseSize; y++) {
+  for (let x = 0; x < noiseSize; x++) {
+    const v = (Math.random() - 0.5) * 30;
+    const r = Math.min(255, Math.max(0, 188 + v));
+    const g = Math.min(255, Math.max(0, 105 + v));
+    const b = Math.min(255, Math.max(0, 80 + v));
+    noiseCtx.fillStyle = `rgb(${r},${g},${b})`;
+    noiseCtx.fillRect(x, y, 1, 1);
+  }
+}
+const noiseTexture = new THREE.CanvasTexture(noiseCanvas);
+noiseTexture.magFilter = THREE.NearestFilter;
+noiseTexture.minFilter = THREE.NearestFilter;
+noiseTexture.wrapS = THREE.RepeatWrapping;
+noiseTexture.wrapT = THREE.RepeatWrapping;
+noiseTexture.repeat.set(1, 1);
+
 function makeExtrudedGeo(vertices: Vertex[], height: number): THREE.ExtrudeGeometry {
   const shape = new THREE.Shape();
   shape.moveTo(vertices[0].x, -vertices[0].z);
@@ -160,7 +183,7 @@ function updatePreview(vertices: Vertex[], extrusion: number) {
   if (extrusion <= 0) return;
   const geo = makeExtrudedGeo(vertices, extrusion);
   const mat = new THREE.MeshStandardMaterial({
-    color: 0x4488ff,
+    map: noiseTexture,
     transparent: true,
     opacity: 0.5,
   });
@@ -240,7 +263,7 @@ function acceptExtrusion(vertices: Vertex[], extrusion: number): boolean {
     return false;
   }
   const geo = makeExtrudedGeo(vertices, extrusion);
-  const mat = new THREE.MeshStandardMaterial({ color: 0x4488ff });
+  const mat = new THREE.MeshStandardMaterial({ map: noiseTexture });
   const mesh = new THREE.Mesh(geo, mat);
   mesh.rotation.x = -Math.PI / 2;
   scene.add(mesh);
