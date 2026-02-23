@@ -1,7 +1,12 @@
 import * as THREE from 'three';
+import * as CANNON from 'cannon-es';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { SSAOPass } from 'three/addons/postprocessing/SSAOPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 // --- Renderer ---
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+const renderer = new THREE.WebGLRenderer();
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(window.devicePixelRatio);
 document.body.appendChild(renderer.domElement);
@@ -60,6 +65,51 @@ const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
 dirLight.position.set(10, 20, 10);
 scene.add(dirLight);
 
+// --- Post-processing (SSAO) ---
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const ssaoPass = new SSAOPass(scene, camera, window.innerWidth, window.innerHeight);
+ssaoPass.kernelRadius = 16;
+ssaoPass.minDistance = 0.001;
+ssaoPass.maxDistance = 0.3;
+composer.addPass(ssaoPass);
+composer.addPass(new OutputPass());
+
+// --- Physics world ---
+const world = new CANNON.World({ gravity: new CANNON.Vec3(0, -9.82, 0) });
+(world.solver as CANNON.GSSolver).iterations = 10;
+world.defaultContactMaterial.friction = 0;
+
+const groundBody = new CANNON.Body({ mass: 0 });
+groundBody.addShape(new CANNON.Plane());
+groundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
+world.addBody(groundBody);
+
+const playerRadius = 0.5;
+const playerMaterial = new CANNON.Material({ friction: 0 });
+const playerBody = new CANNON.Body({
+  mass: 5,
+  shape: new CANNON.Sphere(playerRadius),
+  fixedRotation: true,
+  position: new CANNON.Vec3(0, playerRadius, 5),
+  material: playerMaterial,
+});
+world.addBody(playerBody);
+
+function checkCanJump(): boolean {
+  const from = new CANNON.Vec3(
+    playerBody.position.x,
+    playerBody.position.y,
+    playerBody.position.z,
+  );
+  const to = new CANNON.Vec3(from.x, from.y - playerRadius - 0.15, from.z);
+  const result = new CANNON.RaycastResult();
+  world.raycastClosest(from, to, {}, result);
+  return result.hasHit && result.body !== playerBody;
+}
+
+const eyeOffset = 1.1; // eye at ~1.6m (body center at 0.5 + offset 1.1)
+
 // --- Types ---
 type Vertex = { x: number; z: number };
 
@@ -114,6 +164,35 @@ function updatePreview(vertices: Vertex[], extrusion: number) {
   scene.add(previewMesh);
 }
 
+function addTrimeshBody(geo: THREE.ExtrudeGeometry) {
+  const posAttr = geo.getAttribute('position');
+
+  // Apply the same -PI/2 X rotation to transform vertices into world space
+  const rotMatrix = new THREE.Matrix4().makeRotationX(-Math.PI / 2);
+  const vertices = new Float32Array(posAttr.count * 3);
+  const v = new THREE.Vector3();
+  for (let i = 0; i < posAttr.count; i++) {
+    v.fromBufferAttribute(posAttr, i).applyMatrix4(rotMatrix);
+    vertices[i * 3] = v.x;
+    vertices[i * 3 + 1] = v.y;
+    vertices[i * 3 + 2] = v.z;
+  }
+
+  // Non-indexed geometry: every 3 vertices form a triangle
+  const indices = new Int32Array(posAttr.count);
+  for (let i = 0; i < posAttr.count; i++) {
+    indices[i] = i;
+  }
+
+  const trimesh = new CANNON.Trimesh(
+    vertices as unknown as number[],
+    indices as unknown as number[],
+  );
+  const body = new CANNON.Body({ mass: 0 });
+  body.addShape(trimesh);
+  world.addBody(body);
+}
+
 function acceptExtrusion(vertices: Vertex[], extrusion: number) {
   clearPreview();
   const geo = makeExtrudedGeo(vertices, extrusion);
@@ -121,6 +200,20 @@ function acceptExtrusion(vertices: Vertex[], extrusion: number) {
   const mesh = new THREE.Mesh(geo, mat);
   mesh.rotation.x = -Math.PI / 2;
   scene.add(mesh);
+  addTrimeshBody(geo);
+}
+
+// --- Default geometry: 3-step staircase ---
+for (let i = 0; i < 3; i++) {
+  const z = -2 - i * 2;
+  const height = i + 1;
+  const verts: Vertex[] = [
+    { x: -1, z: z },
+    { x: 1, z: z },
+    { x: 1, z: z - 2 },
+    { x: -1, z: z - 2 },
+  ];
+  acceptExtrusion(verts, height);
 }
 
 // --- Input state ---
@@ -128,6 +221,9 @@ const keys: Record<string, boolean> = {};
 
 window.addEventListener('keydown', (e) => {
   keys[e.code] = true;
+  if (e.code === 'Space' && checkCanJump()) {
+    playerBody.velocity.y = 6;
+  }
   if (uxState.t === 'polygon') {
     if (e.code === 'ArrowUp') {
       uxState.extrusion++;
@@ -198,6 +294,7 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setSize(window.innerWidth, window.innerHeight);
   resizeOverlay();
 });
 
@@ -213,8 +310,8 @@ function viewToScreen(view: THREE.Vector3): ScreenPoint {
 }
 
 function projectVertex(v: Vertex): ScreenPoint | null {
-  const world = new THREE.Vector3(v.x, 0, v.z);
-  const view = world.applyMatrix4(camera.matrixWorldInverse);
+  const worldPos = new THREE.Vector3(v.x, 0, v.z);
+  const view = worldPos.applyMatrix4(camera.matrixWorldInverse);
   if (view.z > -0.2) return null; // behind near plane
   return viewToScreen(view);
 }
@@ -335,20 +432,45 @@ function animate() {
   right.y = 0;
   right.normalize();
 
-  const velocity = new THREE.Vector3();
+  const inputVel = new THREE.Vector3();
 
-  if (keys['KeyW']) velocity.add(forward);
-  if (keys['KeyS']) velocity.sub(forward);
-  if (keys['KeyD']) velocity.add(right);
-  if (keys['KeyA']) velocity.sub(right);
+  if (keys['KeyW']) inputVel.add(forward);
+  if (keys['KeyS']) inputVel.sub(forward);
+  if (keys['KeyD']) inputVel.add(right);
+  if (keys['KeyA']) inputVel.sub(right);
 
-  if (velocity.lengthSq() > 0) {
-    velocity.normalize().multiplyScalar(moveSpeed * dt);
-    camera.position.add(velocity);
+  if (inputVel.lengthSq() > 0) {
+    inputVel.normalize().multiplyScalar(moveSpeed);
   }
 
+  const onGround = checkCanJump();
+  const airAccel = 0.05;
+  const airDecel = 0.002;
+
+  if (onGround) {
+    playerBody.velocity.x = inputVel.x;
+    playerBody.velocity.z = inputVel.z;
+  } else {
+    const airBlend = inputVel.lengthSq() > 0 ? airAccel : airDecel;
+    playerBody.velocity.x += (inputVel.x - playerBody.velocity.x) * airBlend;
+    playerBody.velocity.z += (inputVel.z - playerBody.velocity.z) * airBlend;
+  }
+
+  world.step(1 / 60, dt, 3);
+
+  if (onGround) {
+    playerBody.velocity.x = 0;
+    playerBody.velocity.z = 0;
+  }
+
+  camera.position.set(
+    playerBody.position.x,
+    playerBody.position.y + eyeOffset,
+    playerBody.position.z,
+  );
+
   // --- Render 3D ---
-  renderer.render(scene, camera);
+  composer.render();
 
   // --- Render 2D overlay ---
   olCtx.clearRect(0, 0, window.innerWidth, window.innerHeight);
@@ -356,27 +478,27 @@ function animate() {
   // Vertex highlight (only in idle/drawing states)
   highlightedVertex = null;
   if (uxState.t !== 'polygon') {
-  raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
-  const groundHit = raycaster.ray.intersectPlane(groundPlane, new THREE.Vector3());
-  if (groundHit) {
-    const vx = Math.round(groundHit.x);
-    const vz = Math.round(groundHit.z);
-    const vertexWorld = new THREE.Vector3(vx, 0, vz);
-    const distToCamera = camera.position.distanceTo(vertexWorld);
+    raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+    const groundHit = raycaster.ray.intersectPlane(groundPlane, new THREE.Vector3());
+    if (groundHit) {
+      const vx = Math.round(groundHit.x);
+      const vz = Math.round(groundHit.z);
+      const vertexWorld = new THREE.Vector3(vx, 0, vz);
+      const distToCamera = camera.position.distanceTo(vertexWorld);
 
-    if (distToCamera < 8) {
-      const ndc = vertexWorld.clone().project(camera);
-      const screenDist = Math.sqrt(ndc.x * ndc.x + ndc.y * ndc.y);
+      if (distToCamera < 8) {
+        const ndc = vertexWorld.clone().project(camera);
+        const screenDist = Math.sqrt(ndc.x * ndc.x + ndc.y * ndc.y);
 
-      const ndcThreshold = 0.15 / distToCamera;
-      if (screenDist < ndcThreshold) {
-        highlightedVertex = { x: vx, z: vz };
-        const sx = (ndc.x * 0.5 + 0.5) * window.innerWidth;
-        const sy = (-ndc.y * 0.5 + 0.5) * window.innerHeight;
-        drawHighlight(sx, sy);
+        const ndcThreshold = 0.15 / distToCamera;
+        if (screenDist < ndcThreshold) {
+          highlightedVertex = { x: vx, z: vz };
+          const sx = (ndc.x * 0.5 + 0.5) * window.innerWidth;
+          const sy = (-ndc.y * 0.5 + 0.5) * window.innerHeight;
+          drawHighlight(sx, sy);
+        }
       }
     }
-  }
   } // end if not polygon
 
   drawUxState();
